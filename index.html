@@ -95,6 +95,9 @@ button:disabled { opacity: .4; cursor: default; }
 .gm .wn { font-weight: 700; color: var(--win); }
 .grouphead { padding: 10px 12px; font-size: 13px; color: var(--muted); background: var(--chip); border-top: 1px solid var(--line); }
 .grouphead:first-child { border-top: 0; }
+.prow { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-top: 1px solid var(--line); font-weight: 600; }
+.prow:first-child { border-top: 0; }
+tr.gone td { opacity: .5; }
 
 table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 14px; overflow: hidden; border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 th, td { padding: 10px 8px; text-align: center; border-top: 1px solid var(--line); }
@@ -110,7 +113,7 @@ nav button.on { color: var(--brand-2); box-shadow: inset 0 3px 0 var(--brand-2);
 
 /* modal + toast */
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 10; display: flex; align-items: flex-end; justify-content: center; }
-.sheet { background: var(--card); width: 100%; max-width: 560px; border-radius: 18px 18px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); }
+.sheet { background: var(--card); width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; border-radius: 18px 18px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 20;
   background: #222; color: #fff; padding: 10px 14px; border-radius: 10px; display: flex; gap: 14px; align-items: center; font-size: 15px; max-width: calc(100% - 32px); }
 .toast button { background: none; border: 0; color: var(--accent); font-weight: 700; padding: 0; }
@@ -120,6 +123,7 @@ details summary { cursor: pointer; padding: 4px 0; }
 <body>
 <header>
   <h1>Foosball Cup</h1>
+  <button id="playersBtn" data-act="players" hidden>Players</button>
   <button id="menuBtn" data-act="menu" hidden>End</button>
 </header>
 <main id="app"></main>
@@ -149,6 +153,8 @@ function load() {
   return { roster: DEFAULT_PLAYERS.slice(), selected: DEFAULT_PLAYERS.slice(), current: null, history: [] };
 }
 let S = load();
+// Tournaments saved by earlier versions have no leave/join fields
+[S.current, ...S.history].forEach(t => { if (t) { t.left = t.left || []; t.changed = !!t.changed; } });
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { toast('Could not save - storage is full or blocked'); }
@@ -157,7 +163,7 @@ function save() {
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // ---------- ui state ----------
-let view = 'play', tableMode = 'all', editingId = null, rosterEdit = false, drawing = false;
+let view = 'play', tableMode = 'all', editingId = null, sheet = null, rosterEdit = false, drawing = false;
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -165,7 +171,10 @@ const names = side => side.map(esc).join(' &amp; ');
 const pct = s => s.p ? Math.round((s.w / s.p) * 100) + '%' : '-';
 const nextMatch = t => t.matches.find(m => m.w == null);
 const playedCount = t => t.matches.filter(m => m.w != null).length;
-const roundLabel = (t, m) => m.round >= t.draws.length ? 'Final singles' : `Round ${m.round + 1} of ${t.draws.length}`;
+const activePlayers = t => t.players.filter(p => !t.left.includes(p));
+// Round numbers can have gaps after someone leaves or joins, so label by position.
+const roundList = t => [...new Set(t.matches.map(m => m.round))].sort((x, y) => x - y);
+const roundLabel = (t, m) => { const rs = roundList(t); return `Round ${rs.indexOf(m.round) + 1} of ${rs.length}`; };
 
 // ---------- rendering ----------
 function render() {
@@ -178,13 +187,14 @@ function render() {
   else if (view === 'games') html = renderGames(t);
   else html = renderPlay(t);
   $('#app').innerHTML = html;
-  $('#modal').innerHTML = editingId != null && t ? renderEdit(t) : '';
+  $('#modal').innerHTML = !t ? '' : editingId != null ? renderEdit(t) : sheet === 'players' ? renderPlayers(t) : '';
   document.querySelectorAll('#tabs button').forEach(b => {
     b.classList.toggle('on', b.dataset.view === view);
     if (b.dataset.view === 'play') b.textContent = t ? 'Play' : 'New';
     if (b.dataset.view === 'table' || b.dataset.view === 'games') b.disabled = !t;
   });
   $('#menuBtn').hidden = !t;
+  $('#playersBtn').hidden = !t;
   updateWakeLock();
 }
 
@@ -301,16 +311,16 @@ function gameRow(t, m) {
 }
 
 function renderGames(t) {
-  const rounds = [...new Set(t.matches.map(m => m.round))];
-  return `<div class="list">${rounds.map(r => {
+  const rounds = roundList(t);
+  return `<div class="list">${rounds.map((r, ri) => {
     const ms = t.matches.filter(m => m.round === r);
     const s = ms.filter(m => m.type === 'S'), dd = ms.filter(m => m.type === 'D');
     const d = t.draws[r];
     let out = '';
-    if (s.length) out += `<div class="grouphead">${r >= t.draws.length ? 'Final singles' : `Round ${r + 1}`} &middot; Singles</div>${s.map(m => gameRow(t, m)).join('')}`;
+    if (s.length) out += `<div class="grouphead">Round ${ri + 1} &middot; Singles</div>${s.map(m => gameRow(t, m)).join('')}`;
     if (dd.length) {
       const shown = t.revealed.includes(r);
-      out += `<div class="grouphead">Round ${r + 1} &middot; Doubles${shown ? ` &middot; ${d.teams.map(names).join(', ')}${d.bye ? ` &middot; out: ${esc(d.bye)}` : ''}` : ' &middot; teams not drawn yet'}</div>${dd.map(m => gameRow(t, m)).join('')}`;
+      out += `<div class="grouphead">Round ${ri + 1} &middot; Doubles${shown ? ` &middot; ${d.teams.map(names).join(', ')}${d.bye ? ` &middot; out: ${esc(d.bye)}` : ''}` : ' &middot; teams not drawn yet'}</div>${dd.map(m => gameRow(t, m)).join('')}`;
     }
     return out;
   }).join('')}</div>
@@ -320,17 +330,29 @@ function renderGames(t) {
 function tableHtml(st) {
   return `<table>
     <tr><th>#</th><th class="nm">Player</th><th>P</th><th>W</th><th>L</th><th>Win</th></tr>
-    ${st.map((s, i) => `<tr class="${i === 0 && s.w > 0 ? 'lead' : ''}"><td>${i + 1}</td><td class="nm">${esc(s.name)}</td><td>${s.p}</td><td><b>${s.w}</b></td><td>${s.l}</td><td>${pct(s)}</td></tr>`).join('')}
+    ${st.map((s, i) => `<tr class="${i === 0 && s.w > 0 && !s.left ? 'lead' : ''} ${s.left ? 'gone' : ''}"><td>${s.left ? '' : i + 1}</td><td class="nm">${esc(s.name)}${s.left ? ' <span class="muted small">(left)</span>' : ''}</td><td>${s.p}</td><td><b>${s.w}</b></td><td>${s.l}</td><td>${pct(s)}</td></tr>`).join('')}
+  </table>`;
+}
+
+// Doubles results per pair of players
+function teamTableHtml(ts) {
+  if (!ts.length) return '<p class="muted center">No doubles played yet.</p>';
+  return `<table>
+    <tr><th>#</th><th class="nm">Team</th><th>P</th><th>W</th><th>L</th><th>Win</th></tr>
+    ${ts.map((s, i) => `<tr class="${i === 0 && s.w > 0 ? 'lead' : ''}"><td>${i + 1}</td><td class="nm">${s.names.map(esc).join(' &amp; ')}</td><td>${s.p}</td><td><b>${s.w}</b></td><td>${s.l}</td><td>${pct(s)}</td></tr>`).join('')}
   </table>`;
 }
 
 function renderTable(t) {
+  const note = tableMode === 'T' ? 'Each doubles pairing, ranked by win %, then wins.'
+    : t.changed ? 'Someone left or joined, so not everyone plays the same number of games: ranked by win %, then wins.'
+    : `Ranked by wins, then fewest losses${tableMode === 'all' ? ', then singles wins' : ''}.`;
   return `
     <div class="seg" style="margin-bottom:12px">
-      ${[['all', 'Overall'], ['S', 'Singles'], ['D', 'Doubles']].map(([k, l]) => `<button class="${tableMode === k ? 'on' : ''}" data-act="tmode" data-v="${k}">${l}</button>`).join('')}
+      ${[['all', 'Overall'], ['S', 'Singles'], ['D', 'Doubles'], ['T', 'Teams']].map(([k, l]) => `<button class="${tableMode === k ? 'on' : ''}" data-act="tmode" data-v="${k}">${l}</button>`).join('')}
     </div>
-    ${tableHtml(Sched.standings(t, tableMode))}
-    <p class="muted small">Ranked by wins, then fewest losses${tableMode === 'all' ? ', then singles wins' : ''}. P = played.</p>`;
+    ${tableMode === 'T' ? teamTableHtml(Sched.teamStandings([t])) : tableHtml(Sched.standings(t, tableMode))}
+    <p class="muted small">${note} P = played.</p>`;
 }
 
 function renderHistory() {
@@ -342,7 +364,7 @@ function renderHistory() {
     st.forEach((s, i) => {
       const a = all[s.name] || (all[s.name] = { name: s.name, cups: 0, t: 0, w: 0, l: 0, p: 0 });
       a.t++; a.w += s.w; a.l += s.l; a.p += s.p;
-      if (i === 0) a.cups++;
+      if (i === 0 && !s.left) a.cups++;
     });
   });
   const rows = Object.values(all).sort((x, y) => y.cups - x.cups || y.w - x.w || x.l - y.l);
@@ -351,6 +373,8 @@ function renderHistory() {
     <table><tr><th class="nm">Player</th><th>Cups</th><th>Played</th><th>W</th><th>L</th><th>Win</th></tr>
       ${rows.map(r => `<tr><td class="nm">${esc(r.name)}</td><td><b>${r.cups}</b></td><td>${r.t}</td><td>${r.w}</td><td>${r.l}</td><td>${pct(r)}</td></tr>`).join('')}
     </table>
+    <h2>All-time doubles teams</h2>
+    ${teamTableHtml(Sched.teamStandings(H))}
     <h2>Tournaments</h2>
     ${H.map((t, i) => {
       const st = Sched.standings(t, 'all');
@@ -387,6 +411,29 @@ function renderEdit(t) {
   </div></div>`;
 }
 
+// Who is playing: someone can go home (Leaves) or arrive late (Join).
+function renderPlayers(t) {
+  const active = activePlayers(t);
+  const others = [...new Set([...t.left, ...S.roster])].filter(p => !active.includes(p));
+  const canJoin = active.length < MAX_P;
+  return `<div class="overlay" data-act="closeSheet"><div class="sheet" data-stop>
+    <div class="label">Playing now (${active.length})</div>
+    <div class="list" style="margin-top:8px">${active.map(p => `
+      <div class="prow"><span>${esc(p)}</span>
+        <button class="ghost small danger" data-act="leave" data-name="${esc(p)}" ${active.length <= 2 ? 'disabled' : ''}>Leaves</button></div>`).join('')}
+    </div>
+    <div class="label" style="margin-top:18px">Late arrival</div>
+    ${canJoin ? `
+      ${others.length ? `<div class="chips" style="margin-top:8px">${others.map(p => `<button class="chip" data-act="join" data-name="${esc(p)}">+ ${esc(p)}</button>`).join('')}</div>` : ''}
+      <form class="addform" id="joinForm" autocomplete="off">
+        <input id="joinName" maxlength="20" placeholder="New player name">
+        <button class="ghost" type="submit">Join</button>
+      </form>` : `<p class="muted small">Already at the maximum of ${MAX_P} players.</p>`}
+    <p class="muted small">When someone leaves, their unplayed games are dropped (no forfeits) and the doubles are redrawn for everyone still here. Games already played stay as they are.</p>
+    <button class="ghost" style="width:100%" data-act="closeSheet">Close</button>
+  </div></div>`;
+}
+
 // ---------- actions ----------
 function toast(msg, actionLabel, action) {
   const el = $('#toast');
@@ -408,6 +455,23 @@ function setWinner(id, side) {
   });
 }
 
+// Leave or join, with undo. Rebuilds the unplayed part of the schedule.
+function changePlayers(name, joining) {
+  const t = S.current;
+  const msg = joining
+    ? `${name} joins now? They get singles against everyone still here and are added to the doubles draws.`
+    : `${name} is going home? Their unplayed games are dropped and the doubles are redrawn.`;
+  if (!confirm(msg)) return;
+  const snapshot = JSON.stringify(t);
+  joining ? Sched.join(t, name) : Sched.leave(t, name);
+  sheet = null; editingId = null; view = 'play';
+  save(); render();
+  const left = t.matches.length - playedCount(t);
+  toast(`${name} ${joining ? 'joined' : 'left'} · ${left} games to go`, 'Undo', () => {
+    S.current = JSON.parse(snapshot); save(); render();
+  });
+}
+
 function doDraw() {
   if (drawing) return;
   drawing = true;
@@ -418,7 +482,7 @@ function doDraw() {
   let n = 0;
   // Shuffle animation; the teams themselves were drawn randomly when the tournament was created.
   const iv = setInterval(() => {
-    const p = Sched.shuffle(t.players);
+    const p = Sched.shuffle(activePlayers(t));
     slots.forEach((s, i) => { s.textContent = `${p[2 * i]} & ${p[2 * i + 1]}`; });
     if (++n > 16) {
       clearInterval(iv);
@@ -451,6 +515,15 @@ $('#importFile').addEventListener('change', async e => {
 
 document.addEventListener('submit', e => {
   e.preventDefault();
+  if (e.target.id === 'joinForm') {
+    const name = $('#joinName').value.trim().replace(/\s+/g, ' ');
+    if (!name) return;
+    const existing = [...S.roster, ...S.current.players].find(p => p.toLowerCase() === name.toLowerCase());
+    if (existing && activePlayers(S.current).includes(existing)) { toast(`${existing} is already playing`); return; }
+    if (!existing) S.roster.push(name);
+    changePlayers(existing || name, true);
+    return;
+  }
   const inp = $('#newName'), name = inp.value.trim().replace(/\s+/g, ' ');
   if (!name) return;
   if (S.roster.some(p => p.toLowerCase() === name.toLowerCase())) { toast(`${name} is already on the list`); return; }
@@ -486,6 +559,10 @@ document.addEventListener('click', e => {
       S.current = Sched.build(sel);
       view = 'play'; save(); render(); break;
     }
+    case 'players': sheet = 'players'; editingId = null; render(); break;
+    case 'closeSheet': sheet = null; render(); break;
+    case 'leave': changePlayers(b.dataset.name, false); break;
+    case 'join': changePlayers(b.dataset.name, true); break;
     case 'play': t.live = nextMatch(t).id; save(); render(); break;
     case 'stop': t.live = null; save(); render(); break;
     case 'winner': setWinner(+b.dataset.id, b.dataset.side); break;

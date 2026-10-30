@@ -55,7 +55,7 @@ for (let n = 4; n <= 8; n++) {
 }
 
 // Standings sanity
-const t = Sched.build(['A', 'B', 'C', 'D', 'E'], 10);
+const t = Sched.build(['A', 'B', 'C', 'D', 'E']);
 t.matches.forEach(m => { m.w = 'a'; });
 const st = Sched.standings(t, 'all');
 assert.strictEqual(st.reduce((s, x) => s + x.w, 0), t.matches.reduce((s, m) => s + m.a.length, 0));

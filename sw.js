@@ -1,5 +1,5 @@
 // Offline support: network first (so updates arrive when online), cache as fallback.
-const CACHE = 'foosball-v2';
+const CACHE = 'foosball-v3';
 const ASSETS = ['./', './index.html', './schedule.js', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', './icon-180.png'];
 
 self.addEventListener('install', e => {

@@ -10,6 +10,11 @@ Phone app for running a 4-8 player foosball tournament with singles and doubles.
 - The tournament runs in rounds: a few singles (2 for 5 players), then one doubles draw played out, then the next round.
 - No scores are kept: tap Play when a game starts, then tap the winning side when it ends.
 - Everyone plays the same number of games. Ranking: wins, then fewest losses, then singles wins.
+- Table > Teams shows each doubles pairing's record; History shows all-time player and team records.
+
+## Leaving early / arriving late
+
+Header > Players. When someone leaves, their unplayed games are dropped (no forfeits), games already played stay, and the remaining doubles are redrawn so the players still there partner everyone they haven't partnered yet. A late arrival gets singles against everyone still there and is added to the doubles draws. After either change the ranking switches to win % (then wins), since game counts are no longer equal; players who left are shown greyed out at the bottom and can't win. Both can be undone straight after.
 
 | Players | Singles | Doubles | Total | Games each |
 |---|---|---|---|---|
@@ -28,7 +33,7 @@ Everything is saved in the browser's localStorage on the phone that runs the tou
 - `index.html` - the app (UI, storage)
 - `schedule.js` - scheduling and standings logic
 - `sw.js`, `manifest.webmanifest`, `icon*` - offline support and home-screen install
-- `test/schedule.test.js` - run `node test/schedule.test.js` to check the schedule for 4-8 players
+- `test/` - run `node test/schedule.test.js` and `node test/changes.test.js` to check the schedule, leave/join and team stats
 
 ## Deploy
 
