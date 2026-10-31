@@ -25,6 +25,7 @@
   }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+[hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body { font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; min-height: 100vh;
   padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
@@ -118,11 +119,18 @@ nav button.on { color: var(--brand-2); box-shadow: inset 0 3px 0 var(--brand-2);
   background: #222; color: #fff; padding: 10px 14px; border-radius: 10px; display: flex; gap: 14px; align-items: center; font-size: 15px; max-width: calc(100% - 32px); }
 .toast button { background: none; border: 0; color: var(--accent); font-weight: 700; padding: 0; }
 details summary { cursor: pointer; padding: 4px 0; }
+.linkname { background: none; border: 0; padding: 0; color: inherit; font-weight: 600; text-decoration: underline dotted; text-underline-offset: 3px; }
+.back { background: none; border: 0; color: var(--brand-2); font-weight: 600; padding: 0 0 10px; }
+.banner { background: color-mix(in srgb, var(--accent) 22%, var(--card)); }
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; margin: 12px 0; }
+.kpis b { display: block; font-size: 22px; }
+.spark { width: 100%; height: 60px; display: block; margin-top: 6px; }
+.pickside { margin-top: 14px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Foosball Cup</h1>
+  <h1 id="title">Foosball Cup</h1>
   <button id="playersBtn" data-act="players" hidden>Players</button>
   <button id="menuBtn" data-act="menu" hidden>End</button>
 </header>
@@ -138,6 +146,8 @@ details summary { cursor: pointer; padding: 4px 0; }
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 
 <script src="schedule.js"></script>
+<script src="stats.js"></script>
+<script src="share.js"></script>
 <script>
 'use strict';
 const KEY = 'foosball.v1';
@@ -163,7 +173,10 @@ function save() {
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // ---------- ui state ----------
-let view = 'play', tableMode = 'all', editingId = null, sheet = null, rosterEdit = false, drawing = false;
+// view: play | table | games | history | past (one finished tournament) | shared (opened from a link)
+let view = 'play', tableMode = 'all', pastIdx = 0, rosterEdit = false, drawing = false;
+let modal = null;    // { kind: 'edit' | 'add' | 'players' | 'swap' | 'profile', ... }
+let shared = null;   // tournaments from a share link (read only)
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -172,30 +185,48 @@ const pct = s => s.p ? Math.round((s.w / s.p) * 100) + '%' : '-';
 const nextMatch = t => t.matches.find(m => m.w == null);
 const playedCount = t => t.matches.filter(m => m.w != null).length;
 const activePlayers = t => t.players.filter(p => !t.left.includes(p));
-// Round numbers can have gaps after someone leaves or joins, so label by position.
-const roundList = t => [...new Set(t.matches.map(m => m.round))].sort((x, y) => x - y);
-const roundLabel = (t, m) => { const rs = roundList(t); return `Round ${rs.indexOf(m.round) + 1} of ${rs.length}`; };
+const day = t => new Date(t.started).toLocaleDateString();
+// Round numbers can have gaps after someone leaves or joins, so label by position. Added games have no round.
+const roundList = t => [...new Set(t.matches.filter(m => !m.extra).map(m => m.round))].sort((x, y) => x - y);
+const roundLabel = (t, m) => {
+  if (m.extra) return 'Added game';
+  const rs = roundList(t);
+  return `Round ${rs.indexOf(m.round) + 1} of ${rs.length}`;
+};
+// Tournaments the History views show: from a share link, or this phone's finished ones
+const historyList = () => (shared || S.history);
 
 // ---------- rendering ----------
 function render() {
   const t = S.current;
   if (!t && (view === 'table' || view === 'games')) view = 'play';
   let html;
-  if (view === 'history') html = renderHistory();
-  else if (!t) html = renderSetup();
-  else if (view === 'table') html = renderTable(t);
-  else if (view === 'games') html = renderGames(t);
+  if (shared) html = renderShared();
+  else if (view === 'history') html = renderHistory(S.history, false);
+  else if (view === 'past' && S.history[pastIdx]) html = renderPast(S.history[pastIdx], false);
+  else if (!t) { if (view === 'past') view = 'history'; html = view === 'history' ? renderHistory(S.history, false) : renderSetup(); }
+  else if (view === 'table') html = standingsBlock(t);
+  else if (view === 'games') html = renderGames(t, true);
   else html = renderPlay(t);
   $('#app').innerHTML = html;
-  $('#modal').innerHTML = !t ? '' : editingId != null ? renderEdit(t) : sheet === 'players' ? renderPlayers(t) : '';
+  $('#modal').innerHTML = renderModal();
+  $('#tabs').hidden = !!shared;
   document.querySelectorAll('#tabs button').forEach(b => {
-    b.classList.toggle('on', b.dataset.view === view);
+    b.classList.toggle('on', b.dataset.view === view || (view === 'past' && b.dataset.view === 'history'));
     if (b.dataset.view === 'play') b.textContent = t ? 'Play' : 'New';
     if (b.dataset.view === 'table' || b.dataset.view === 'games') b.disabled = !t;
   });
-  $('#menuBtn').hidden = !t;
-  $('#playersBtn').hidden = !t;
+  $('#menuBtn').hidden = !t || !!shared;
+  $('#playersBtn').hidden = !t || !!shared;
   updateWakeLock();
+}
+
+function renderModal() {
+  if (!modal) return '';
+  const body = {
+    edit: renderEdit, add: renderAdd, players: renderPlayers, swap: renderSwap, profile: renderProfile
+  }[modal.kind]();
+  return `<div class="overlay" data-act="closeModal"><div class="sheet" data-stop>${body}</div></div>`;
 }
 
 function renderSetup() {
@@ -223,7 +254,8 @@ function renderSetup() {
       </div>
       <p class="muted small">${c.draws} rounds. Each round: ${c.singlesPerRound} singles, then a random doubles draw where
       ${c.teams} teams all play each other${n % 2 ? ' (one player sits out each draw)' : ''}.
-      By the end everyone has played everyone in singles and partnered everyone once in doubles.</p>`
+      By the end everyone has played everyone in singles and partnered everyone once in doubles.
+      Games are ordered so nobody sits out for long.</p>`
       : `<p class="muted">Pick between ${MIN_P} and ${MAX_P} players.</p>`}
     <button class="primary" data-act="start" ${ok ? '' : 'disabled'}>Start tournament</button>
   </section>`;
@@ -236,15 +268,15 @@ function renderPlay(t) {
     <p class="muted center small">${done} of ${total} games played</p>`;
 
   if (!m) {
-    const st = Sched.standings(t, 'all');
+    const ch = Sched.champion(t);
     return h + `
       <section class="card champ">
         <div class="label">Champion</div>
-        <div class="big">${esc(st[0].name)}</div>
-        <p class="muted">${st[0].w} wins from ${st[0].p} games</p>
+        <div class="big">${ch ? esc(ch.name) : '-'}</div>
+        ${ch ? `<p class="muted">${ch.w} wins from ${ch.p} games (${pct(ch)})</p>` : ''}
         <button class="primary" data-act="finish">Finish and save to history</button>
       </section>
-      ${tableHtml(st)}`;
+      ${tableHtml(Sched.standings(t, 'all'))}`;
   }
 
   const d = t.draws[m.round];
@@ -260,6 +292,7 @@ function renderPlay(t) {
 
   // Next game: tap Play to start it, then tap the winning side to finish it.
   const live = t.live === m.id;
+  const canSwap = !live && Sched.swapOptions(t).length > 0;
   h += `
     <section class="card ${live ? 'live' : ''}">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -274,63 +307,72 @@ function renderPlay(t) {
       </div>
       ${live ? `
         <p class="ask">Who won?</p>
-        ${winnerButtons(m)}
+        ${winnerButtons(m, 'winner')}
         <div class="row-btns"><button class="ghost small" data-act="stop">Not started yet</button></div>`
-      : `<button class="primary" data-act="play">Play</button>`}
-      ${m.type === 'D' && d.teams.length > 2 ? `<p class="sitout center">Teams this round: ${d.teams.map(names).join(' &middot; ')}</p>` : ''}
-      ${m.type === 'D' && d.bye ? `<p class="sitout center">Sitting out: ${esc(d.bye)}</p>` : ''}
+      : `<button class="primary" data-act="play">Play</button>
+         ${canSwap ? '<div class="row-btns"><button class="ghost small" data-act="swap">Someone not ready? Swap game</button></div>' : ''}`}
+      ${m.type === 'D' && d && d.teams.length > 2 ? `<p class="sitout center">Teams this round: ${d.teams.map(names).join(' &middot; ')}</p>` : ''}
+      ${m.type === 'D' && d && d.bye ? `<p class="sitout center">Sitting out: ${esc(d.bye)}</p>` : ''}
     </section>`;
 
   const upcoming = t.matches.filter(x => x.w == null && x.id !== m.id).slice(0, 4);
-  if (upcoming.length) {
-    h += `<h2>Up next</h2><div class="list">${upcoming.map(x => gameRow(t, x)).join('')}</div>`;
-  }
+  if (upcoming.length) h += `<h2>Up next</h2><div class="list">${upcoming.map(x => gameRow(t, x, false)).join('')}</div>`;
   const last = t.matches.filter(x => x.w != null).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
-  if (last) h += `<h2>Last result</h2><div class="list">${gameRow(t, last)}</div>`;
+  if (last) h += `<h2>Last result</h2><div class="list">${gameRow(t, last, true)}</div>`;
   return h;
 }
 
 // One big button per side; `m.w` highlights the current winner when editing.
-function winnerButtons(m) {
+function winnerButtons(m, act) {
   return `<div class="winbtns">
-    <button class="winbtn ${m.w === 'a' ? 'cur' : ''}" data-act="winner" data-id="${m.id}" data-side="a">${names(m.a)}</button>
-    <button class="winbtn ${m.w === 'b' ? 'cur' : ''}" data-act="winner" data-id="${m.id}" data-side="b">${names(m.b)}</button>
+    <button class="winbtn ${m.w === 'a' ? 'cur' : ''}" data-act="${act}" data-id="${m.id}" data-side="a">${names(m.a)}</button>
+    <button class="winbtn ${m.w === 'b' ? 'cur' : ''}" data-act="${act}" data-id="${m.id}" data-side="b">${names(m.b)}</button>
   </div>`;
 }
 
-function gameRow(t, m) {
-  const hidden = m.type === 'D' && !t.revealed.includes(m.round) && m.w == null;
+function gameRow(t, m, editable) {
+  const hidden = m.type === 'D' && !m.extra && !t.revealed.includes(m.round) && m.w == null && !t.shared;
   const played = m.w != null;
   const a = hidden ? 'Team ?' : names(m.a), b = hidden ? 'Team ?' : names(m.b);
-  const isNext = nextMatch(t) === m;
-  return `<button class="gm ${played ? 'done' : ''} ${isNext ? 'next' : ''}" ${hidden ? 'disabled' : `data-act="edit" data-id="${m.id}"`}>
+  const isNext = !t.finished && nextMatch(t) === m;
+  const tag = editable && !hidden ? `data-act="edit" data-id="${m.id}"` : 'disabled';
+  return `<button class="gm ${played ? 'done' : ''} ${isNext ? 'next' : ''}" ${tag}>
     <span class="${m.w === 'a' ? 'wn' : ''}">${m.w === 'a' ? '&#10003; ' : ''}${a}</span>
     <span class="sc">vs</span>
     <span class="r ${m.w === 'b' ? 'wn' : ''}">${b}${m.w === 'b' ? ' &#10003;' : ''}</span>
   </button>`;
 }
 
-function renderGames(t) {
+function renderGames(t, editable) {
   const rounds = roundList(t);
-  return `<div class="list">${rounds.map((r, ri) => {
-    const ms = t.matches.filter(m => m.round === r);
+  const finished = !!t.finished || !!t.shared;
+  const extras = t.matches.filter(m => m.extra);
+  const groups = rounds.map((r, ri) => {
+    const ms = t.matches.filter(m => m.round === r && !m.extra && (!finished || m.w != null));
     const s = ms.filter(m => m.type === 'S'), dd = ms.filter(m => m.type === 'D');
-    const d = t.draws[r];
+    const d = t.draws && t.draws[r];
     let out = '';
-    if (s.length) out += `<div class="grouphead">Round ${ri + 1} &middot; Singles</div>${s.map(m => gameRow(t, m)).join('')}`;
+    if (s.length) out += `<div class="grouphead">Round ${ri + 1} &middot; Singles</div>${s.map(m => gameRow(t, m, editable)).join('')}`;
     if (dd.length) {
-      const shown = t.revealed.includes(r);
-      out += `<div class="grouphead">Round ${ri + 1} &middot; Doubles${shown ? ` &middot; ${d.teams.map(names).join(', ')}${d.bye ? ` &middot; out: ${esc(d.bye)}` : ''}` : ' &middot; teams not drawn yet'}</div>${dd.map(m => gameRow(t, m)).join('')}`;
+      const shown = d && t.revealed.includes(r);
+      out += `<div class="grouphead">Round ${ri + 1} &middot; Doubles${shown ? ` &middot; ${d.teams.map(names).join(', ')}${d.bye ? ` &middot; out: ${esc(d.bye)}` : ''}` : finished ? '' : ' &middot; teams not drawn yet'}</div>${dd.map(m => gameRow(t, m, editable)).join('')}`;
     }
     return out;
-  }).join('')}</div>
-  <p class="muted small center">Tap a game to set or change its winner.</p>`;
+  }).join('');
+  const extraHtml = extras.length ? `<div class="grouphead">Added games</div>${extras.map(m => gameRow(t, m, editable)).join('')}` : '';
+  return `<div class="list">${groups + extraHtml || '<div class="grouphead">No games</div>'}</div>
+    ${editable ? `<button class="ghost" style="width:100%;margin-top:10px" data-act="addGame">+ Add a missed game</button>
+    <p class="muted small center">Tap a game to set or change its winner.</p>` : ''}`;
 }
 
 function tableHtml(st) {
+  let rank = 0;
   return `<table>
     <tr><th>#</th><th class="nm">Player</th><th>P</th><th>W</th><th>L</th><th>Win</th></tr>
-    ${st.map((s, i) => `<tr class="${i === 0 && s.w > 0 && !s.left ? 'lead' : ''} ${s.left ? 'gone' : ''}"><td>${s.left ? '' : i + 1}</td><td class="nm">${esc(s.name)}${s.left ? ' <span class="muted small">(left)</span>' : ''}</td><td>${s.p}</td><td><b>${s.w}</b></td><td>${s.l}</td><td>${pct(s)}</td></tr>`).join('')}
+    ${st.map((s, i) => {
+      const note = s.left ? ' <span class="muted small">(left)</span>' : !s.ranked && s.p ? ' <span class="muted small">(few games)</span>' : '';
+      return `<tr class="${i === 0 && s.ranked && s.w > 0 ? 'lead' : ''} ${s.ranked ? '' : 'gone'}"><td>${s.ranked ? ++rank : ''}</td><td class="nm">${esc(s.name)}${note}</td><td>${s.p}</td><td><b>${s.w}</b></td><td>${s.l}</td><td>${pct(s)}</td></tr>`;
+    }).join('')}
   </table>`;
 }
 
@@ -343,10 +385,10 @@ function teamTableHtml(ts) {
   </table>`;
 }
 
-function renderTable(t) {
+// Overall / Singles / Doubles / Teams tables for one tournament
+function standingsBlock(t) {
   const note = tableMode === 'T' ? 'Each doubles pairing, ranked by win %, then wins.'
-    : t.changed ? 'Someone left or joined, so not everyone plays the same number of games: ranked by win %, then wins.'
-    : `Ranked by wins, then fewest losses${tableMode === 'all' ? ', then singles wins' : ''}.`;
+    : 'Ranked by win %, so playing more games is no advantage; ties go to more wins. Players with under half the games of the busiest player are listed but not ranked.';
   return `
     <div class="seg" style="margin-bottom:12px">
       ${[['all', 'Overall'], ['S', 'Singles'], ['D', 'Doubles'], ['T', 'Teams']].map(([k, l]) => `<button class="${tableMode === k ? 'on' : ''}" data-act="tmode" data-v="${k}">${l}</button>`).join('')}
@@ -355,68 +397,153 @@ function renderTable(t) {
     <p class="muted small">${note} P = played.</p>`;
 }
 
-function renderHistory() {
-  const H = S.history;
-  // All-time totals across finished tournaments
-  const all = {};
-  H.forEach(t => {
-    const st = Sched.standings(t, 'all');
-    st.forEach((s, i) => {
-      const a = all[s.name] || (all[s.name] = { name: s.name, cups: 0, t: 0, w: 0, l: 0, p: 0 });
-      a.t++; a.w += s.w; a.l += s.l; a.p += s.p;
-      if (i === 0 && !s.left) a.cups++;
-    });
-  });
-  const rows = Object.values(all).sort((x, y) => y.cups - x.cups || y.w - x.w || x.l - y.l);
+function renderHistory(list, readonly) {
+  const rows = Stats.allTime(list);
   return `
-    ${H.length ? `<h2 style="margin-top:0">All time</h2>
-    <table><tr><th class="nm">Player</th><th>Cups</th><th>Played</th><th>W</th><th>L</th><th>Win</th></tr>
-      ${rows.map(r => `<tr><td class="nm">${esc(r.name)}</td><td><b>${r.cups}</b></td><td>${r.t}</td><td>${r.w}</td><td>${r.l}</td><td>${pct(r)}</td></tr>`).join('')}
+    ${list.length ? `<h2 style="margin-top:0">All time</h2>
+    <table><tr><th class="nm">Player</th><th>Rating</th><th>Cups</th><th>P</th><th>Win</th></tr>
+      ${rows.map((r, i) => `<tr class="${i === 0 ? 'lead' : ''}"><td class="nm"><button class="linkname" data-act="profile" data-name="${esc(r.name)}">${esc(r.name)}</button></td><td><b>${r.rating}</b></td><td>${r.cups}</td><td>${r.p}</td><td>${pct(r)}</td></tr>`).join('')}
     </table>
+    <p class="muted small">Rating starts at 1000 and goes up more for beating stronger players, so it reflects who you beat, not how many games you played. Tap a name for their stats.</p>
     <h2>All-time doubles teams</h2>
-    ${teamTableHtml(Sched.teamStandings(H))}
+    ${teamTableHtml(Sched.teamStandings(list))}
     <h2>Tournaments</h2>
-    ${H.map((t, i) => {
-      const st = Sched.standings(t, 'all');
-      const played = playedCount(t);
-      return `<details class="card"><summary><b>${new Date(t.started).toLocaleDateString()}</b> &middot; winner ${esc(st[0].name)}
-        <span class="muted small">&middot; ${t.players.length} players, ${played}/${t.matches.length} games</span></summary>
-        <div style="margin-top:10px">${tableHtml(st)}</div>
-        <div class="row-btns"><button class="ghost small danger" data-act="delHist" data-i="${i}">Delete this tournament</button></div>
-      </details>`;
-    }).join('')}` : '<p class="muted center">No finished tournaments yet.</p>'}
-    <h2>Backup</h2>
+    <div class="list">${list.map((t, i) => {
+      const ch = Sched.champion(t);
+      return `<button class="gm" style="grid-template-columns:1fr auto" data-act="openPast" data-i="${i}">
+        <span><b>${day(t)}</b> &middot; ${t.players.length} players, ${playedCount(t)} games</span>
+        <span class="r wn">${ch ? esc(ch.name) : ''}</span></button>`;
+    }).join('')}</div>
+    ${readonly ? '' : '<button class="ghost" style="width:100%;margin-top:10px" data-act="shareAll">Share all-time stats</button>'}`
+    : '<p class="muted center">No finished tournaments yet.</p>'}
+    ${readonly ? '' : `<h2>Backup</h2>
     <section class="card">
       <p class="muted small" style="margin-top:0">Everything is stored only on this phone. Export a backup now and then, or to move to another phone.</p>
       <div class="row-btns">
         <button class="ghost" data-act="export">Export backup</button>
         <button class="ghost" data-act="import">Import backup</button>
       </div>
-    </section>`;
+    </section>`}`;
 }
 
-function renderEdit(t) {
-  const m = t.matches[editingId];
-  return `<div class="overlay" data-act="closeEdit"><div class="sheet" data-stop>
+// One finished tournament: full tables, all games, add a missed game, share
+function renderPast(t, readonly, showBack = true) {
+  const ch = Sched.champion(t);
+  return `
+    ${showBack ? '<button class="back" data-act="backHistory">&larr; History</button>' : ''}
+    <section class="card champ">
+      <div class="label">${day(t)} &middot; ${t.players.length} players &middot; ${playedCount(t)} games</div>
+      <div class="big">${ch ? esc(ch.name) : '-'}</div>
+      ${ch ? `<p class="muted">Champion &middot; ${ch.w} wins from ${ch.p} games (${pct(ch)})</p>` : ''}
+      ${readonly ? '' : '<button class="primary" data-act="shareOne">Share results</button>'}
+    </section>
+    ${standingsBlock(t)}
+    <h2>Games</h2>
+    ${renderGames(t, !readonly)}
+    ${readonly ? '' : '<div class="row-btns"><button class="ghost small danger" data-act="delHist">Delete this tournament</button></div>'}`;
+}
+
+// Opened from a share link: read only, with an option to keep a copy
+function renderShared() {
+  const one = shared.length === 1;
+  const banner = `<section class="card banner">
+    <b>Shared results</b> <span class="muted small">&middot; view only</span>
+    <div class="row-btns">
+      <button class="ghost" data-act="saveShared">Save to this phone</button>
+      <button class="ghost" data-act="closeShared">Open my app</button>
+    </div></section>`;
+  if (one) return banner + renderPast(shared[0], true, false);
+  if (view === 'past' && shared[pastIdx]) return banner + renderPast(shared[pastIdx], true);
+  return banner + renderHistory(shared, true);
+}
+
+function renderEdit() {
+  const { t, id } = modal, m = t.matches[id];
+  return `
     <div style="display:flex;justify-content:space-between;align-items:center">
       <span class="badge ${m.type === 'D' ? 'd' : ''}">${m.type === 'D' ? 'Doubles' : 'Singles'}</span>
       <span class="label">${roundLabel(t, m)} &middot; Game ${m.id + 1}</span>
     </div>
     <p class="ask">Who won?</p>
-    ${winnerButtons(m)}
+    ${winnerButtons(m, 'mwinner')}
     <div class="row-btns">
-      ${m.w != null ? '<button class="ghost danger" data-act="clear">Clear result</button>' : ''}
-      <button class="ghost" data-act="closeEdit">Cancel</button>
+      ${m.extra ? '<button class="ghost danger" data-act="delGame">Delete game</button>'
+        : m.w != null && !t.finished ? '<button class="ghost danger" data-act="clear">Clear result</button>' : ''}
+      <button class="ghost" data-act="closeModal">Cancel</button>
+    </div>`;
+}
+
+// Add a missed game: pick 1-2 players a side, then tap the winner
+function renderAdd() {
+  const { t, a, b } = modal;
+  const chips = (side, list, other) => `<div class="chips" style="margin-top:8px">${list.map(p => {
+    const on = side.includes(p), off = other.includes(p) || (!on && side.length >= 2);
+    return `<button class="chip ${on ? 'on' : ''}" data-act="addPick" data-side="${side === a ? 'a' : 'b'}" data-name="${esc(p)}" ${off ? 'disabled' : ''}>${esc(p)}</button>`;
+  }).join('')}</div>`;
+  const ready = a.length && b.length;
+  return `
+    <div class="label">Add a missed game</div>
+    <p class="muted small">For a game that was played but not recorded. Pick one or two players for each side.</p>
+    <div class="pickside"><b>Side 1</b>${chips(a, t.players, b)}</div>
+    <div class="pickside"><b>Side 2</b>${chips(b, t.players, a)}</div>
+    <p class="ask">Who won?</p>
+    <div class="winbtns">
+      <button class="winbtn" data-act="addSave" data-side="a" ${ready ? '' : 'disabled'}>${a.length ? names(a) : 'Side 1'}</button>
+      <button class="winbtn" data-act="addSave" data-side="b" ${ready ? '' : 'disabled'}>${b.length ? names(b) : 'Side 2'}</button>
     </div>
-  </div></div>`;
+    <div class="row-btns"><button class="ghost" data-act="closeModal">Cancel</button></div>`;
+}
+
+// Someone isn't ready: play another already-scheduled game first
+function renderSwap() {
+  const t = S.current, m = nextMatch(t);
+  const busy = [...m.a, ...m.b];
+  const opts = Sched.swapOptions(t);
+  return `
+    <div class="label">Swap game</div>
+    <p class="muted small">Play one of these scheduled games first instead of <b>${names(m.a)} vs ${names(m.b)}</b>. That game moves to where this one was.</p>
+    <div class="list">${opts.map(o => {
+      const clash = [...o.a, ...o.b].some(p => busy.includes(p));
+      return `<button class="gm" data-act="swapTo" data-id="${o.id}">
+        <span>${names(o.a)}</span><span class="sc">${o.type === 'D' ? 'dbl' : 'vs'}</span><span class="r">${names(o.b)}${clash ? ' <span class="muted small">*</span>' : ''}</span></button>`;
+    }).join('')}</div>
+    <p class="muted small">* includes someone from the current game.</p>
+    <div class="row-btns"><button class="ghost" data-act="closeModal">Cancel</button></div>`;
+}
+
+// One player's all-time stats
+function renderProfile() {
+  const p = Stats.profile(historyList(), modal.name);
+  const all = { p: p.singles.p + p.doubles.p, w: p.singles.w + p.doubles.w };
+  const rec = r => `${r.w}-${r.p - r.w} (${pct(r)})`;
+  const tr = [Stats.START, ...p.trend];
+  const lo = Math.min(...tr), hi = Math.max(...tr), span = Math.max(1, hi - lo);
+  const pts = tr.map((v, i) => `${(i / Math.max(1, tr.length - 1)) * 300},${55 - ((v - lo) / span) * 50}`).join(' ');
+  const recTable = (rows, head) => rows.length ? `<table><tr><th class="nm">${head}</th><th>P</th><th>W</th><th>L</th><th>Win</th></tr>
+    ${rows.map(r => `<tr><td class="nm">${esc(r.name)}</td><td>${r.p}</td><td>${r.w}</td><td>${r.p - r.w}</td><td>${pct(r)}</td></tr>`).join('')}</table>` : '<p class="muted small">None yet.</p>';
+  return `
+    <div class="label">Player</div>
+    <div style="font-size:26px;font-weight:800">${esc(p.name)}</div>
+    <div class="kpis">
+      <div><b>${p.rating}</b><span class="muted small">rating</span></div>
+      <div><b>${p.cups}</b><span class="muted small">cups</span></div>
+      <div><b>${pct(all)}</b><span class="muted small">won</span></div>
+    </div>
+    <svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" aria-label="Rating over time">
+      <polyline points="${pts}" fill="none" stroke="var(--brand-2)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+    <p class="muted small">Rating after each game. Singles ${rec(p.singles)} &middot; Doubles ${rec(p.doubles)} &middot;
+      ${p.tournaments} tournaments &middot; best winning run ${p.bestRun}</p>
+    <h2>With each partner (doubles)</h2>${recTable(p.partners, 'Partner')}
+    <h2>Against each player (singles)</h2>${recTable(p.rivals, 'Opponent')}
+    <div class="row-btns"><button class="ghost" data-act="closeModal">Close</button></div>`;
 }
 
 // Who is playing: someone can go home (Leaves) or arrive late (Join).
-function renderPlayers(t) {
-  const active = activePlayers(t);
+function renderPlayers() {
+  const t = S.current, active = activePlayers(t);
   const others = [...new Set([...t.left, ...S.roster])].filter(p => !active.includes(p));
   const canJoin = active.length < MAX_P;
-  return `<div class="overlay" data-act="closeSheet"><div class="sheet" data-stop>
+  return `
     <div class="label">Playing now (${active.length})</div>
     <div class="list" style="margin-top:8px">${active.map(p => `
       <div class="prow"><span>${esc(p)}</span>
@@ -429,9 +556,8 @@ function renderPlayers(t) {
         <input id="joinName" maxlength="20" placeholder="New player name">
         <button class="ghost" type="submit">Join</button>
       </form>` : `<p class="muted small">Already at the maximum of ${MAX_P} players.</p>`}
-    <p class="muted small">When someone leaves, their unplayed games are dropped (no forfeits) and the doubles are redrawn for everyone still here. Games already played stay as they are.</p>
-    <button class="ghost" style="width:100%" data-act="closeSheet">Close</button>
-  </div></div>`;
+    <p class="muted small">When someone leaves, a game in progress is still finished, their other unplayed games are dropped (no forfeits) and the doubles are redrawn for everyone still here. Games already played stay as they are.</p>
+    <button class="ghost" style="width:100%" data-act="closeModal">Close</button>`;
 }
 
 // ---------- actions ----------
@@ -443,12 +569,12 @@ function toast(msg, actionLabel, action) {
   toast.tm = setTimeout(() => { el.innerHTML = ''; }, 4000);
 }
 
-function setWinner(id, side) {
-  const t = S.current, m = t.matches[id];
+function setWinner(t, id, side) {
+  const m = t.matches[id];
   const prev = { w: m.w, at: m.at, live: t.live };
-  m.w = side; m.at = Date.now();
+  m.w = side; m.at = m.at || Date.now();
   if (t.live === id) t.live = null;
-  editingId = null;
+  modal = null;
   save(); render();
   toast(`${(side === 'a' ? m.a : m.b).join(' & ')} won`, 'Undo', () => {
     m.w = prev.w; m.at = prev.at; t.live = prev.live; save(); render();
@@ -460,16 +586,24 @@ function changePlayers(name, joining) {
   const t = S.current;
   const msg = joining
     ? `${name} joins now? They get singles against everyone still here and are added to the doubles draws.`
-    : `${name} is going home? Their unplayed games are dropped and the doubles are redrawn.`;
+    : `${name} is going home? A game in progress is still finished; their other unplayed games are dropped and the doubles are redrawn.`;
   if (!confirm(msg)) return;
   const snapshot = JSON.stringify(t);
   joining ? Sched.join(t, name) : Sched.leave(t, name);
-  sheet = null; editingId = null; view = 'play';
+  modal = null; view = 'play';
   save(); render();
-  const left = t.matches.length - playedCount(t);
-  toast(`${name} ${joining ? 'joined' : 'left'} · ${left} games to go`, 'Undo', () => {
+  const togo = t.matches.length - playedCount(t);
+  toast(`${name} ${joining ? 'joined' : 'left'} · ${togo} games to go`, 'Undo', () => {
     S.current = JSON.parse(snapshot); save(); render();
   });
+}
+
+function finishTournament(t) {
+  t.finished = new Date().toISOString();
+  t.live = null;
+  S.history.unshift(t); S.current = null;
+  view = 'past'; pastIdx = 0; tableMode = 'all';
+  save(); render(); window.scrollTo(0, 0);
 }
 
 function doDraw() {
@@ -480,7 +614,7 @@ function doDraw() {
   const btn = document.querySelector('[data-act="draw"]');
   if (btn) btn.disabled = true;
   let n = 0;
-  // Shuffle animation; the teams themselves were drawn randomly when the tournament was created.
+  // Shuffle animation; the teams themselves were drawn randomly when the schedule was made.
   const iv = setInterval(() => {
     const p = Sched.shuffle(activePlayers(t));
     slots.forEach((s, i) => { s.textContent = `${p[2 * i]} & ${p[2 * i + 1]}`; });
@@ -490,6 +624,41 @@ function doDraw() {
       save(); drawing = false; render();
     }
   }, 80);
+}
+
+// Share a link with the results packed into it. Uses the phone's share menu, or copies the link.
+async function shareLink(list, title) {
+  try {
+    const url = `${location.origin}${location.pathname}#s=${await Share.encode(list)}`;
+    if (navigator.share) {
+      await navigator.share({ title, text: title, url });
+    } else {
+      await navigator.clipboard.writeText(url);
+      toast('Link copied - paste it anywhere');
+    }
+  } catch (e) {
+    if (e && e.name !== 'AbortError') toast('Could not share the link');
+  }
+}
+
+async function openSharedLink() {
+  const m = location.hash.match(/^#s=(.+)$/);
+  if (!m) return false;
+  try {
+    shared = await Share.decode(m[1]);
+    view = 'shared'; pastIdx = 0; tableMode = 'all';
+  } catch (e) {
+    shared = null;
+    toast('That link could not be opened');
+  }
+  render();
+  return true;
+}
+
+function closeShared() {
+  shared = null; view = 'history';
+  history.replaceState(null, '', location.pathname);
+  render();
 }
 
 function exportData() {
@@ -532,6 +701,9 @@ document.addEventListener('submit', e => {
   save(); render();
 });
 
+// The tournament a Games/Table action applies to: the one being viewed
+const viewedTournament = () => (view === 'past' ? S.history[pastIdx] : S.current);
+
 document.addEventListener('click', e => {
   if (e.target.closest('[data-stop]') && !e.target.closest('[data-act]')) return;
   const b = e.target.closest('[data-act]');
@@ -540,7 +712,7 @@ document.addEventListener('click', e => {
   if (b.classList.contains('overlay') && e.target !== b) return;
   const act = b.dataset.act, t = S.current;
   switch (act) {
-    case 'tab': view = b.dataset.view; editingId = null; render(); window.scrollTo(0, 0); break;
+    case 'tab': view = b.dataset.view; modal = null; render(); window.scrollTo(0, 0); break;
     case 'toggle': {
       const nm = b.dataset.name;
       S.selected = S.selected.includes(nm) ? S.selected.filter(p => p !== nm) : [...S.selected, nm];
@@ -559,39 +731,75 @@ document.addEventListener('click', e => {
       S.current = Sched.build(sel);
       view = 'play'; save(); render(); break;
     }
-    case 'players': sheet = 'players'; editingId = null; render(); break;
-    case 'closeSheet': sheet = null; render(); break;
+    case 'players': modal = { kind: 'players' }; render(); break;
+    case 'closeModal': modal = null; render(); break;
     case 'leave': changePlayers(b.dataset.name, false); break;
     case 'join': changePlayers(b.dataset.name, true); break;
     case 'play': t.live = nextMatch(t).id; save(); render(); break;
     case 'stop': t.live = null; save(); render(); break;
-    case 'winner': setWinner(+b.dataset.id, b.dataset.side); break;
+    case 'winner': setWinner(t, +b.dataset.id, b.dataset.side); break;
+    case 'mwinner': setWinner(modal.t, +b.dataset.id, b.dataset.side); break;
+    case 'swap': modal = { kind: 'swap' }; render(); break;
+    case 'swapTo': {
+      const i = nextMatch(t).id, j = +b.dataset.id;
+      Sched.swapGames(t, i, j);
+      modal = null; save(); render();
+      toast('Games swapped', 'Undo', () => { Sched.swapGames(t, i, j); save(); render(); });
+      break;
+    }
     case 'draw': doDraw(); break;
-    case 'edit': editingId = +b.dataset.id; render(); break;
-    case 'closeEdit': editingId = null; render(); break;
+    case 'edit': modal = { kind: 'edit', t: viewedTournament(), id: +b.dataset.id }; render(); break;
     case 'clear': {
-      const m = t.matches[editingId];
+      const m = modal.t.matches[modal.id];
       m.w = null; m.at = null;
-      editingId = null; save(); render(); break;
+      modal = null; save(); render(); break;
+    }
+    case 'addGame': modal = { kind: 'add', t: viewedTournament(), a: [], b: [] }; render(); break;
+    case 'addPick': {
+      const side = modal[b.dataset.side], nm = b.dataset.name, i = side.indexOf(nm);
+      i >= 0 ? side.splice(i, 1) : side.push(nm);
+      render(); break;
+    }
+    case 'addSave': {
+      const tt = modal.t, g = Sched.addGame(tt, modal.a, modal.b, b.dataset.side);
+      modal = null; save(); render();
+      toast('Game added', 'Undo', () => { Sched.removeGame(tt, tt.matches.indexOf(g)); save(); render(); });
+      break;
+    }
+    case 'delGame': {
+      if (!confirm('Delete this added game?')) return;
+      Sched.removeGame(modal.t, modal.id);
+      modal = null; save(); render(); break;
     }
     case 'tmode': tableMode = b.dataset.v; render(); break;
-    case 'finish': {
-      t.finished = new Date().toISOString();
-      S.history.unshift(t); S.current = null; view = 'history'; save(); render(); break;
-    }
+    case 'finish': finishTournament(t); break;
     case 'menu': {
       const played = playedCount(t);
       if (played === 0) {
         if (confirm('No games played yet. Cancel this tournament?')) { S.current = null; view = 'play'; save(); render(); }
       } else if (confirm(`End the tournament now and save it to history? (${played} of ${t.matches.length} games played)`)) {
-        t.finished = new Date().toISOString();
-        S.history.unshift(t); S.current = null; view = 'history'; save(); render();
+        finishTournament(t);
       }
       break;
     }
+    case 'openPast': view = 'past'; pastIdx = +b.dataset.i; tableMode = 'all'; render(); window.scrollTo(0, 0); break;
+    case 'backHistory': view = shared ? 'shared' : 'history'; render(); window.scrollTo(0, 0); break;
     case 'delHist':
-      if (confirm('Delete this tournament from history?')) { S.history.splice(+b.dataset.i, 1); save(); render(); }
+      if (confirm('Delete this tournament from history?')) { S.history.splice(pastIdx, 1); view = 'history'; save(); render(); }
       break;
+    case 'profile': modal = { kind: 'profile', name: b.dataset.name }; render(); break;
+    case 'shareOne': { const pt = S.history[pastIdx]; shareLink([pt], `Foosball ${day(pt)}`); break; }
+    case 'shareAll': shareLink(S.history, 'Foosball all-time stats'); break;
+    case 'saveShared': {
+      const have = new Set(S.history.map(h => h.id));
+      const add = shared.filter(x => !have.has(x.id)).map(x => { const c = { ...x }; delete c.shared; return c; });
+      S.history.push(...add);
+      S.history.sort((x, y) => String(y.started).localeCompare(String(x.started)));
+      save();
+      toast(add.length ? `Saved ${add.length} tournament${add.length > 1 ? 's' : ''}` : 'Already saved on this phone');
+      break;
+    }
+    case 'closeShared': closeShared(); break;
     case 'export': exportData(); break;
     case 'import': $('#importFile').click(); break;
   }
@@ -600,7 +808,7 @@ document.addEventListener('click', e => {
 // ---------- keep screen awake while a game is on ----------
 let wakeLock = null;
 async function updateWakeLock() {
-  const want = !!S.current && view === 'play' && document.visibilityState === 'visible';
+  const want = !!S.current && !shared && view === 'play' && document.visibilityState === 'visible';
   try {
     if (want && !wakeLock && 'wakeLock' in navigator) {
       wakeLock = await navigator.wakeLock.request('screen');
@@ -609,11 +817,12 @@ async function updateWakeLock() {
   } catch (e) { /* not supported or denied - fine */ }
 }
 document.addEventListener('visibilitychange', updateWakeLock);
+window.addEventListener('hashchange', () => { openSharedLink(); });
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-render();
+openSharedLink().then(opened => { if (!opened) render(); });
 </script>
 </body>
 </html>

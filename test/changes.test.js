@@ -22,10 +22,11 @@ function check(t, playedBefore) {
   playedBefore.forEach(p => assert.ok(t.matches.some(m => m.w === p.w && key(...m.a) === key(...p.a) && key(...m.b) === key(...p.b) && m.type === p.type), 'played game kept'));
   assert.strictEqual(t.matches.filter(m => m.w != null).length, playedBefore.length);
   // nobody who left has a game to play
-  unplayed.forEach(m => [...m.a, ...m.b].forEach(p => assert.ok(active.includes(p), 'leaver scheduled')));
+  // (the game in progress is the exception: it is finished first)
+  unplayed.filter(m => m.id !== t.live).forEach(m => [...m.a, ...m.b].forEach(p => assert.ok(active.includes(p), 'leaver scheduled')));
   // every active singles pairing played or scheduled exactly once
   active.forEach((x, i) => active.slice(i + 1).forEach(y => {
-    const n = t.matches.filter(m => m.type === 'S' && key(m.a[0], m.b[0]) === key(x, y)).length;
+    const n = t.matches.filter(m => m.type === 'S' && !m.extra && key(m.a[0], m.b[0]) === key(x, y)).length;
     assert.strictEqual(n, 1, `singles ${x}-${y} x${n}`);
   }));
   // every active pair partners at least once (played or scheduled) when doubles are possible
@@ -49,15 +50,18 @@ for (let run = 0; run < 2000; run++) {
   // someone leaves
   const active = t.players.filter(p => !t.left.includes(p));
   if (active.length > 2) {
-    const leaver = active[Math.floor(Math.random() * active.length)];
+    const lv = t.live != null ? t.matches[t.live] : null;
+    const leaver = lv && Math.random() < .5 ? lv.a[0] : active[Math.floor(Math.random() * active.length)];
     const before = t.matches.filter(m => m.w != null).map(m => ({ ...m }));
     Sched.leave(t, leaver);
     check(t, before);
-    if (t.live != null) {
+    // A game in progress is never dropped, even if the leaver is playing in it
+    if (liveBefore) {
+      assert.notStrictEqual(t.live, null, 'live game dropped');
       const lm = t.matches[t.live];
       assert.strictEqual(lm, t.matches.find(m => m.w == null), 'live is next game');
       const sides = m => [key(...m.a), key(...m.b)].sort().join(' v ');
-      assert.ok(liveBefore && sides(lm) === sides(liveBefore), 'live kept same game');
+      assert.strictEqual(sides(lm), sides(liveBefore), 'live kept same game');
     }
   }
   playSome(t, Math.floor(Math.random() * 6));
